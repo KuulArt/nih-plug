@@ -8,6 +8,8 @@ use std::sync::Arc;
 use vst3_com::vst::{DataEvent, IProcessContextRequirementsFlags, ProcessModes};
 use vst3_sys::base::{kInvalidArgument, kNoInterface, kResultFalse, kResultOk, tresult, TBool};
 use vst3_sys::base::{IBStream, IPluginBase};
+use vst3_sys::interfaces::iunknown::IUnknownVPtr;
+use vst3_sys::interfaces::IUnknown;
 use vst3_sys::utils::SharedVstPtr;
 use vst3_sys::vst::{
     kNoParamId, kNoParentUnitId, kNoProgramListId, kRootUnitId, Event, EventTypes, IAudioProcessor,
@@ -16,7 +18,7 @@ use vst3_sys::vst::{
     LegacyMidiCCOutEvent, NoteExpressionTypeInfo, NoteExpressionValueDescription, NoteOffEvent,
     NoteOnEvent, ParameterFlags, PolyPressureEvent, ProgramListInfo, TChar, UnitInfo,
 };
-use vst3_sys::VST3;
+use vst3_sys::{ComInterface, VST3};
 use widestring::U16CStr;
 
 use super::gain_reduction::IGainReductionInfo;
@@ -55,8 +57,68 @@ pub struct Wrapper<P: Vst3Plugin> {
 
 impl<P: Vst3Plugin> Wrapper<P> {
     pub fn new() -> Box<Self> {
-        Self::allocate(WrapperInner::new())
+        let wrapper = Self::allocate(WrapperInner::new());
+        if wrapper.inner.gain_reduction_meter.is_none() {
+            // SAFETY: The host has not received this object yet
+            unsafe { wrapper.hide_gain_reduction_info() };
+        }
+
+        wrapper
     }
+
+    /// The `VST3` attribute macro's `QueryInterface()` always exposes every interface from the
+    /// `implements(...)` list. Plugins that don't report their gain reduction should not claim to
+    /// implement `IGainReductionInfo`, so this points the `QueryInterface()` entry of each of this
+    /// object's vtables to [`query_interface_without_gain_reduction()`].
+    ///
+    /// # Safety
+    ///
+    /// This must be called before the object is shared with the host.
+    unsafe fn hide_gain_reduction_info(&self) {
+        // `CoClass` requires the vtable pointers to be the struct's first fields, in
+        // `implements(...)` order. Each object owns its own vtables, and each vtable starts with
+        // `IUnknown`'s vtable.
+        macro_rules! replace_query_interface {
+            ($($vptr:ident => $index:literal),*) => {$(
+                nih_debug_assert_eq!(
+                    std::ptr::addr_of!(self.$vptr) as usize - self as *const Self as usize,
+                    $index * mem::size_of::<*const c_void>()
+                );
+                (*(self.$vptr as *mut <dyn IUnknown as ComInterface>::VTable)).QueryInterface =
+                    query_interface_without_gain_reduction::<P, $index>;
+            )*};
+        }
+
+        replace_query_interface!(
+            __icomponentvptr => 0,
+            __ieditcontrollervptr => 1,
+            __iaudioprocessorvptr => 2,
+            __imidimappingvptr => 3,
+            __inoteexpressioncontrollervptr => 4,
+            __iprocesscontextrequirementsvptr => 5,
+            __iunitinfovptr => 6,
+            __igainreductioninfovptr => 7
+        );
+    }
+}
+
+/// The `QueryInterface()` for the vtable pointer at index `VPTR_INDEX` of a [`Wrapper`] whose
+/// plugin doesn't report its gain reduction. See [`Wrapper::hide_gain_reduction_info()`].
+unsafe extern "system" fn query_interface_without_gain_reduction<
+    P: Vst3Plugin,
+    const VPTR_INDEX: usize,
+>(
+    this: *mut IUnknownVPtr,
+    riid: *const vst3_sys::IID,
+    obj: *mut *mut c_void,
+) -> tresult {
+    if *riid == <dyn IGainReductionInfo as ComInterface>::IID {
+        *obj = std::ptr::null_mut();
+        return kNoInterface;
+    }
+
+    let wrapper = &*(this.sub(VPTR_INDEX) as *const Wrapper<P>);
+    wrapper.query_interface(riid, obj)
 }
 
 impl<P: Vst3Plugin> Drop for Wrapper<P> {
@@ -1898,8 +1960,7 @@ impl<P: Vst3Plugin> IUnitInfo for Wrapper<P> {
 
 impl<P: Vst3Plugin> IGainReductionInfo for Wrapper<P> {
     unsafe fn get_gain_reduction_value_in_db(&self) -> f64 {
-        // The macro generating `QueryInterface()` can't make this interface conditional, so plugins
-        // that don't report their gain reduction always report 0 dB
+        // Hosts can only query this interface if the plugin reports its gain reduction
         match &self.inner.gain_reduction_meter {
             // This also catches NaN values and positive gain, which the interface doesn't allow
             Some(meter) => meter.load(Ordering::Relaxed).min(0.0) as f64,

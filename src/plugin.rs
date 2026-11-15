@@ -175,9 +175,8 @@ pub trait Plugin: Default + Send + 'static {
     ///
     /// This is exposed through PreSonus' `IGainReductionInfo` VST3 extension, which is also what
     /// REAPER uses for its `GainReduction_dB` named config parameter, and through the draft
-    /// `clap.gain-adjustment-metering` CLAP extension. The CLAP extension is only exposed if this
-    /// returns `Some`. VST3 plugins always expose the interface and report `0.0` when this returns
-    /// `None`.
+    /// `clap.gain-adjustment-metering` CLAP extension. Both are only exposed if this returns
+    /// `Some`, so hosts won't show a gain reduction meter for plugins that don't need one.
     ///
     /// Queried only once immediately after the plugin instance is created.
     fn gain_reduction_meter(&self) -> Option<Arc<AtomicF32>> {
