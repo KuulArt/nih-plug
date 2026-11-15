@@ -21,6 +21,14 @@ state is to list breaking changes.
   `GainReduction_dB` named config parameter and Studio One uses for its gain
   reduction meters, and through the draft `clap.gain-adjustment-metering` CLAP
   extension. The `gain` example now reports any attenuation as gain reduction.
+- Editors can now opt into host-driven resizing, for instance when the user
+  drags the edge of the host's plugin window or when the host shrinks the window
+  to fit on the screen. Return `true` from the new `Editor::can_resize()` and
+  implement `Editor::set_size()`, and optionally `Editor::constrain_size()` to
+  clamp the host's proposed sizes. This is wired up for VST3's
+  `IPlugView::canResize()`, `checkSizeConstraint()` and `onSize()`, and for
+  CLAP's `can_resize()`, `get_resize_hints()`, `adjust_size()` and
+  `set_size()`. Editors that don't opt in keep their fixed size as before.
 
 ## [2025-02-23]
 

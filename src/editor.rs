@@ -45,6 +45,37 @@ pub trait Editor: Send {
     /// scaling factor to get the actual physical screen pixels.
     fn size(&self) -> (u32, u32);
 
+    /// Whether the host may resize the editor, for instance when the user drags the edge of the
+    /// host's plugin window or when the host shrinks the window to fit on the screen. If this
+    /// returns `true`, then the host's proposed sizes are passed through
+    /// [`constrain_size()`][Self::constrain_size()] and applied with
+    /// [`set_size()`][Self::set_size()]. Defaults to `false`, in which case the editor keeps the
+    /// size it reports from [`size()`][Self::size()].
+    fn can_resize(&self) -> bool {
+        false
+    }
+
+    /// Turn a size proposed by the host into the nearest size the editor accepts, in _logical
+    /// pixels_ like [`size()`][Self::size()]. This is used to clamp a resize to the editor's minimum
+    /// and maximum size, or to snap it to a fixed aspect ratio. Only called when
+    /// [`can_resize()`][Self::can_resize()] returns `true`. The default accepts any size.
+    fn constrain_size(&self, width: u32, height: u32) -> (u32, u32) {
+        (width, height)
+    }
+
+    /// Called when the host resizes the editor's window to `width` and `height` in _logical
+    /// pixels_. Only called when [`can_resize()`][Self::can_resize()] returns `true`, with a size
+    /// that has already been passed through [`constrain_size()`][Self::constrain_size()].
+    ///
+    /// Return `true` if the editor accepts the new size. From then on it must report that size
+    /// from [`size()`][Self::size()], and it must resize its own window to match. This may be
+    /// called from a different thread than the editor's GUI thread, so the actual window resize
+    /// will usually need to be posted to the GUI thread. The default rejects the resize.
+    fn set_size(&self, width: u32, height: u32) -> bool {
+        let _ = (width, height);
+        false
+    }
+
     /// Set the DPI scaling factor, if supported. The plugin APIs don't make any guarantees on when
     /// this is called, but for now just assume it will be the first function that gets called
     /// before creating the editor. If this is set, then any windows created by this editor should
@@ -73,7 +104,6 @@ pub trait Editor: Send {
     //       and API agnostic, add a way to ask the GuiContext if the wrapper already provides a
     //       tick function. If it does not, then the Editor implementation must handle this by
     //       itself. This would also need an associated `PREFERRED_FRAME_RATE` constant.
-    // TODO: Host->Plugin resizing
 }
 
 /// A raw window handle for platform and GUI framework agnostic editors. This implements
