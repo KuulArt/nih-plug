@@ -1,9 +1,14 @@
 use nih_plug::prelude::*;
 use parking_lot::Mutex;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 struct Gain {
     params: Arc<GainParams>,
+
+    /// Reported to the host as the plugin's gain reduction. A compressor would store its gain
+    /// reduction here. This example simply reports any attenuation from the gain parameter.
+    gain_reduction_meter: Arc<AtomicF32>,
 }
 
 /// The [`Params`] derive macro gathers all of the information needed for the wrapper to know about
@@ -54,6 +59,8 @@ impl Default for Gain {
     fn default() -> Self {
         Self {
             params: Arc::new(GainParams::default()),
+
+            gain_reduction_meter: Arc::new(AtomicF32::new(0.0)),
         }
     }
 }
@@ -163,6 +170,11 @@ impl Plugin for Gain {
         self.params.clone()
     }
 
+    // Hosts like REAPER and Studio One can display the gain reduction reported here
+    fn gain_reduction_meter(&self) -> Option<Arc<AtomicF32>> {
+        Some(self.gain_reduction_meter.clone())
+    }
+
     // This plugin doesn't need any special initialization, but if you need to do anything expensive
     // then this would be the place. State is kept around when the host reconfigures the
     // plugin. If we do need special initialization, we could implement the `initialize()` and/or
@@ -174,21 +186,28 @@ impl Plugin for Gain {
         _aux: &mut AuxiliaryBuffers,
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
+        let mut gain = self.params.gain.smoothed.previous_value();
         for channel_samples in buffer.iter_samples() {
             // Smoothing is optionally built into the parameters themselves
-            let gain = self.params.gain.smoothed.next();
+            gain = self.params.gain.smoothed.next();
 
             for sample in channel_samples {
                 *sample *= gain;
             }
         }
 
+        // Gain reduction is reported as zero or a negative number of decibels
+        self.gain_reduction_meter
+            .store(util::gain_to_db(gain).min(0.0), Ordering::Relaxed);
+
         ProcessStatus::Normal
     }
 
     // This can be used for cleaning up special resources like socket connections whenever the
     // plugin is deactivated. Most plugins won't need to do anything here.
-    fn deactivate(&mut self) {}
+    fn deactivate(&mut self) {
+        self.gain_reduction_meter.store(0.0, Ordering::Relaxed);
+    }
 }
 
 impl ClapPlugin for Gain {
