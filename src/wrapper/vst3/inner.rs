@@ -1,3 +1,4 @@
+use atomic_float::AtomicF32;
 use atomic_refcell::AtomicRefCell;
 use crossbeam::atomic::AtomicCell;
 use crossbeam::channel::{self, SendTimeoutError};
@@ -36,6 +37,9 @@ pub(crate) struct WrapperInner<P: Vst3Plugin> {
     /// `ParamPtr`s are guaranteed to live at least as long as this object and we can interact with
     /// the `Params` object without having to acquire a lock on `plugin`.
     pub params: Arc<dyn Params>,
+    /// The plugin's gain reduction meter, if it reports its gain reduction. See
+    /// [`Plugin::gain_reduction_meter()`][crate::prelude::Plugin::gain_reduction_meter()].
+    pub gain_reduction_meter: Option<Arc<AtomicF32>>,
     /// The plugin's editor, if it has one. This object does not do anything on its own, but we need
     /// to instantiate this in advance so we don't need to lock the entire [`Plugin`] object when
     /// creating an editor. Wrapped in an `AtomicRefCell` because it needs to be initialized late.
@@ -201,6 +205,7 @@ impl<P: Vst3Plugin> WrapperInner<P> {
         // we'll calculate from the string ID specified by the plugin. These parameters should also
         // remain in the same order as the one returned by the plugin.
         let params = plugin.params();
+        let gain_reduction_meter = plugin.gain_reduction_meter();
         let param_id_hashes_ptrs_groups: Vec<_> = params
             .param_map()
             .into_iter()
@@ -278,6 +283,7 @@ impl<P: Vst3Plugin> WrapperInner<P> {
             plugin: Mutex::new(plugin),
             task_executor,
             params,
+            gain_reduction_meter,
             // Initialized later as it needs a reference to the wrapper for the async executor
             editor: AtomicRefCell::new(None),
 

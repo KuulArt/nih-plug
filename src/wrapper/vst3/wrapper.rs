@@ -19,6 +19,7 @@ use vst3_sys::vst::{
 use vst3_sys::VST3;
 use widestring::U16CStr;
 
+use super::gain_reduction::IGainReductionInfo;
 use super::inner::{ProcessEvent, WrapperInner};
 use super::note_expressions::{self, NoteExpressionController};
 use super::util::{
@@ -45,7 +46,8 @@ use vst3_sys as vst3_com;
     IMidiMapping,
     INoteExpressionController,
     IProcessContextRequirements,
-    IUnitInfo
+    IUnitInfo,
+    IGainReductionInfo
 ))]
 pub struct Wrapper<P: Vst3Plugin> {
     inner: Arc<WrapperInner<P>>,
@@ -1891,5 +1893,17 @@ impl<P: Vst3Plugin> IUnitInfo for Wrapper<P> {
         _data: SharedVstPtr<dyn IBStream>,
     ) -> tresult {
         kInvalidArgument
+    }
+}
+
+impl<P: Vst3Plugin> IGainReductionInfo for Wrapper<P> {
+    unsafe fn get_gain_reduction_value_in_db(&self) -> f64 {
+        // The macro generating `QueryInterface()` can't make this interface conditional, so plugins
+        // that don't report their gain reduction always report 0 dB
+        match &self.inner.gain_reduction_meter {
+            // This also catches NaN values and positive gain, which the interface doesn't allow
+            Some(meter) => meter.load(Ordering::Relaxed).min(0.0) as f64,
+            None => 0.0,
+        }
     }
 }

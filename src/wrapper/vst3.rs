@@ -3,6 +3,7 @@ mod util;
 
 mod context;
 mod factory;
+mod gain_reduction;
 mod inner;
 mod note_expressions;
 mod param_units;
