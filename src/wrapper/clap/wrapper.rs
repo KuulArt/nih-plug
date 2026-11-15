@@ -79,6 +79,9 @@ use std::time::Duration;
 
 use super::context::{WrapperGuiContext, WrapperInitContext, WrapperProcessContext};
 use super::descriptor::PluginDescriptor;
+use super::ext::gain_adjustment_metering::{
+    clap_plugin_gain_adjustment_metering, CLAP_EXT_GAIN_ADJUSTMENT_METERING,
+};
 use super::util::ClapPtr;
 use crate::event_loop::{BackgroundThread, EventLoop, MainThreadExecutor, TASK_QUEUE_CAPACITY};
 use crate::midi::MidiResult;
@@ -112,6 +115,9 @@ pub struct Wrapper<P: ClapPlugin> {
     /// `ParamPtr`s are guaranteed to live at least as long as this object and we can interact with
     /// the `Params` object without having to acquire a lock on `plugin`.
     params: Arc<dyn Params>,
+    /// The plugin's gain reduction meter, if it reports its gain reduction. See
+    /// [`Plugin::gain_reduction_meter()`][crate::prelude::Plugin::gain_reduction_meter()].
+    gain_reduction_meter: Option<Arc<AtomicF32>>,
     /// The plugin's editor, if it has one. This object does not do anything on its own, but we need
     /// to instantiate this in advance so we don't need to lock the entire [`Plugin`] object when
     /// creating an editor. Wrapped in an `AtomicRefCell` because it needs to be initialized late.
@@ -176,6 +182,8 @@ pub struct Wrapper<P: ClapPlugin> {
     _plugin_descriptor: Box<PluginDescriptor>,
 
     clap_plugin_audio_ports: clap_plugin_audio_ports,
+
+    clap_plugin_gain_adjustment_metering: clap_plugin_gain_adjustment_metering,
 
     clap_plugin_gui: clap_plugin_gui,
     host_gui: AtomicRefCell<Option<ClapPtr<clap_host_gui>>>,
@@ -449,6 +457,7 @@ impl<P: ClapPlugin> Wrapper<P> {
         // we'll calculate from the string ID specified by the plugin. These parameters should also
         // remain in the same order as the one returned by the plugin.
         let params = plugin.params();
+        let gain_reduction_meter = plugin.gain_reduction_meter();
         let param_id_hashes_ptrs_groups: Vec<_> = params
             .param_map()
             .into_iter()
@@ -538,6 +547,7 @@ impl<P: ClapPlugin> Wrapper<P> {
             plugin: Mutex::new(plugin),
             task_executor,
             params,
+            gain_reduction_meter,
             // Initialized later as it needs a reference to the wrapper for the async executor
             editor: AtomicRefCell::new(None),
             editor_handle: Mutex::new(None),
@@ -594,6 +604,10 @@ impl<P: ClapPlugin> Wrapper<P> {
             clap_plugin_audio_ports: clap_plugin_audio_ports {
                 count: Some(Self::ext_audio_ports_count),
                 get: Some(Self::ext_audio_ports_get),
+            },
+
+            clap_plugin_gain_adjustment_metering: clap_plugin_gain_adjustment_metering {
+                get: Some(Self::ext_gain_adjustment_metering_get),
             },
 
             clap_plugin_gui: clap_plugin_gui {
@@ -2316,6 +2330,9 @@ impl<P: ClapPlugin> Wrapper<P> {
             &wrapper.clap_plugin_audio_ports_config as *const _ as *const c_void
         } else if id == CLAP_EXT_AUDIO_PORTS {
             &wrapper.clap_plugin_audio_ports as *const _ as *const c_void
+        } else if id == CLAP_EXT_GAIN_ADJUSTMENT_METERING && wrapper.gain_reduction_meter.is_some()
+        {
+            &wrapper.clap_plugin_gain_adjustment_metering as *const _ as *const c_void
         } else if id == CLAP_EXT_GUI && wrapper.editor.borrow().is_some() {
             // Only report that we support this extension if the plugin has an editor
             &wrapper.clap_plugin_gui as *const _ as *const c_void
@@ -2573,6 +2590,23 @@ impl<P: ClapPlugin> Wrapper<P> {
         info.in_place_pair = pair_stable_id;
 
         true
+    }
+
+    unsafe extern "C" fn ext_gain_adjustment_metering_get(plugin: *const clap_plugin) -> f64 {
+        check_null_ptr!(0.0, plugin, (*plugin).plugin_data);
+        let wrapper = &*((*plugin).plugin_data as *const Self);
+
+        match &wrapper.gain_reduction_meter {
+            Some(meter) => {
+                let gain_db = meter.load(Ordering::Relaxed);
+                if gain_db.is_finite() {
+                    gain_db as f64
+                } else {
+                    0.0
+                }
+            }
+            None => 0.0,
+        }
     }
 
     unsafe extern "C" fn ext_gui_is_api_supported(

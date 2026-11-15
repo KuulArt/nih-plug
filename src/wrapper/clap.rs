@@ -3,6 +3,7 @@ mod util;
 
 mod context;
 mod descriptor;
+mod ext;
 pub mod features;
 mod wrapper;
 
