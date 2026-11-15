@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use crate::prelude::{
-    AsyncExecutor, AudioIOLayout, AuxiliaryBuffers, Buffer, BufferConfig, Editor, InitContext,
-    MidiConfig, Params, PluginState, ProcessContext, SysExMessage,
+    AsyncExecutor, AtomicF32, AudioIOLayout, AuxiliaryBuffers, Buffer, BufferConfig, Editor,
+    InitContext, MidiConfig, Params, PluginState, ProcessContext, SysExMessage,
 };
 
 pub mod clap;
@@ -163,6 +163,24 @@ pub trait Plugin: Default + Send + 'static {
     /// Queried only once immediately after the plugin instance is created. This function takes
     /// `&mut self` to make it easier to move data into the `Editor` implementation.
     fn editor(&mut self, async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        None
+    }
+
+    /// Lets the plugin report the gain reduction it is currently applying, so the host can display
+    /// it. Return an `Arc<AtomicF32>` you also keep a copy of, and store the current gain reduction
+    /// in decibels in it from [`process()`][Self::process()] using relaxed atomic stores. The value
+    /// should be either `0.0` (no gain reduction) or negative, and it should be set back to `0.0`
+    /// when the plugin is bypassed or reset. If the plugin has several gain reduction stages, store
+    /// their sum. The host reads the value as is, so any ballistics should be applied by the plugin.
+    ///
+    /// This is exposed through PreSonus' `IGainReductionInfo` VST3 extension, which is also what
+    /// REAPER uses for its `GainReduction_dB` named config parameter, and through the draft
+    /// `clap.gain-adjustment-metering` CLAP extension. The CLAP extension is only exposed if this
+    /// returns `Some`. VST3 plugins always expose the interface and report `0.0` when this returns
+    /// `None`.
+    ///
+    /// Queried only once immediately after the plugin instance is created.
+    fn gain_reduction_meter(&self) -> Option<Arc<AtomicF32>> {
         None
     }
 
