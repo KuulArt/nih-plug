@@ -10,6 +10,18 @@ Since there is no stable release yet, the changes are organized per day in
 reverse chronological order. The main purpose of this document in its current
 state is to list breaking changes.
 
+## [2026-11-15]
+
+### Added
+
+- Plugins can now report their current gain reduction to the host by returning
+  an `Arc<AtomicF32>` from the new `Plugin::gain_reduction_meter()` method and
+  storing the gain reduction in decibels in it. This is exposed through
+  PreSonus' `IGainReductionInfo` VST3 extension, which REAPER uses for its
+  `GainReduction_dB` named config parameter and Studio One uses for its gain
+  reduction meters, and through the draft `clap.gain-adjustment-metering` CLAP
+  extension. The `gain` example now reports any attenuation as gain reduction.
+
 ## [2025-02-23]
 
 ### Breaking changes
