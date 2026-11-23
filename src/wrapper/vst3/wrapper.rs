@@ -732,7 +732,7 @@ impl<P: Vst3Plugin> IEditController for Wrapper<P> {
     unsafe fn set_param_normalized(&self, id: u32, value: f64) -> tresult {
         // If the plugin is currently processing audio, then this parameter change will also be sent
         // to the process function
-        if self.inner.is_processing.load(Ordering::SeqCst) {
+        if !self.inner.audio_stalled() {
             return kResultOk;
         }
 
@@ -996,6 +996,7 @@ impl<P: Vst3Plugin> IAudioProcessor for Wrapper<P> {
     #[allow(clippy::mut_range_bound)]
     unsafe fn process(&self, data: *mut vst3_sys::vst::ProcessData) -> tresult {
         check_null_ptr!(data);
+        self.inner.heartbeat.beat();
 
         // Panic on allocations if the `assert_process_allocs` feature has been enabled, and make
         // sure that FTZ is set up correctly

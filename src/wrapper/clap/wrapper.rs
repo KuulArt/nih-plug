@@ -95,6 +95,7 @@ use crate::wrapper::clap::context::RemoteControlPages;
 use crate::wrapper::clap::util::{read_stream, write_stream};
 use crate::wrapper::state::{self, PluginState};
 use crate::wrapper::util::buffer_management::{BufferManager, ChannelPointers};
+use crate::wrapper::util::heartbeat::Heartbeat;
 use crate::wrapper::util::{
     clamp_input_event_timing, clamp_output_event_timing, hash_param_id, process_wrapper, strlcpy,
 };
@@ -132,6 +133,8 @@ pub struct Wrapper<P: ClapPlugin> {
     editor_scaling_factor: AtomicF32,
 
     is_processing: AtomicBool,
+    /// Stamped at the start of every `process()` call, see [`Self::audio_stalled()`].
+    heartbeat: Heartbeat,
     /// The current IO configuration, modified through the `clap_plugin_audio_ports_config`
     /// extension. Initialized to the plugin's first audio IO configuration.
     current_audio_io_layout: AtomicCell<AudioIOLayout>,
@@ -554,6 +557,7 @@ impl<P: ClapPlugin> Wrapper<P> {
             editor_scaling_factor: AtomicF32::new(1.0),
 
             is_processing: AtomicBool::new(false),
+            heartbeat: Heartbeat::default(),
             current_audio_io_layout: AtomicCell::new(
                 P::AUDIO_IO_LAYOUTS.first().copied().unwrap_or_default(),
             ),
@@ -777,6 +781,23 @@ impl<P: ClapPlugin> Wrapper<P> {
             .get(&param)
             .and_then(|hash| self.param_id_by_hash.get(hash))
             .map(|s| s.as_str())
+    }
+
+    /// Sets a GUI parameter change at once if no `process()` call or flush can be counted on to
+    /// do it: the plugin is not processing, or the host stopped calling `process()` (REAPER's FX
+    /// bypass, which doesn't flush either). The queued output event sets it again later.
+    pub fn set_value_if_audio_stalled(&self, param_hash: u32, clap_plain_value: f64) {
+        if self
+            .heartbeat
+            .audio_stalled(self.is_processing.load(Ordering::SeqCst))
+        {
+            let sample_rate = self.current_buffer_config.load().map(|c| c.sample_rate);
+            self.update_plain_value_by_hash(
+                param_hash,
+                ClapParamUpdate::PlainValueSet(clap_plain_value),
+                sample_rate,
+            );
+        }
     }
 
     /// Queue a parameter output event to be sent to the host at the end of the audio processing
@@ -1968,6 +1989,7 @@ impl<P: ClapPlugin> Wrapper<P> {
     ) -> clap_process_status {
         check_null_ptr!(CLAP_PROCESS_ERROR, plugin, (*plugin).plugin_data, process);
         let wrapper = &*((*plugin).plugin_data as *const Self);
+        wrapper.heartbeat.beat();
 
         // Panic on allocations if the `assert_process_allocs` feature has been enabled, and make
         // sure that FTZ is set up correctly

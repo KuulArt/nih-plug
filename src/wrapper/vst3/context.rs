@@ -1,7 +1,6 @@
 use atomic_refcell::AtomicRefMut;
 use std::cell::Cell;
 use std::collections::VecDeque;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use vst3_sys::vst::IComponentHandler;
 
@@ -164,11 +163,9 @@ impl<P: Vst3Plugin> GuiContext for WrapperGuiContext<P> {
                     // Only update the parameters manually if the host is not processing audio. If
                     // the plugin is currently processing audio, the host will pass this change back
                     // to the plugin in the audio callback. This also prevents the values from
-                    // changing in the middle of the process callback, which would be unsound.
-                    // FIXME: So this doesn't work for REAPER, because they just silently stop
-                    //        processing audio when you bypass the plugin. Great. We can add a time
-                    //        based heuristic to work around this in the meantime.
-                    if !self.inner.is_processing.load(Ordering::SeqCst) {
+                    // changing in the middle of the process callback. REAPER's bypass silently
+                    // stops processing, which `audio_stalled()` catches with a time out.
+                    if self.inner.audio_stalled() {
                         self.inner.set_normalized_value_by_hash(
                             *hash,
                             normalized,
