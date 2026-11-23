@@ -109,6 +109,14 @@ impl StalledEdits {
         }
     }
 
+    /// A state or preset load replaces every value, so no bundle carries one anymore. Gestures
+    /// stay so they remain balanced.
+    pub fn drop_values(&self) {
+        for slot in self.slots.values() {
+            slot.flags.fetch_and(!VALUE, Ordering::AcqRel);
+        }
+    }
+
     /// Takes the bundle when its marker is popped from the queue.
     pub fn take(&self, param_hash: u32) -> Bundle {
         let Some(slot) = self.slots.get(&param_hash) else {
@@ -319,6 +327,26 @@ mod tests {
         sim.edit(0, Edit::End, true);
         sim.edits.host_set(0);
         assert_eq!(sim.drain(), [Event::Begin(0), Event::End(0)]);
+    }
+
+    #[test]
+    fn state_load_drops_stalled_values_but_keeps_gestures() {
+        let mut sim = Sim::new(2);
+        let mut open = HashMap::new();
+        sim.edit(0, Edit::Begin, true);
+        sim.edit(0, Edit::Set(0.6), true);
+        sim.edit(0, Edit::End, true);
+        sim.edit(1, Edit::Begin, true);
+        sim.edit(1, Edit::Set(0.3), true);
+        sim.edits.drop_values();
+        let out = sim.drain();
+        assert_eq!(out, [Event::Begin(0), Event::End(0), Event::Begin(1)]);
+        assert_balanced(&out, &mut open);
+
+        sim.edit(1, Edit::End, false);
+        let out = sim.drain();
+        assert_eq!(out, [Event::End(1)]);
+        assert_balanced(&out, &mut open);
     }
 
     #[test]

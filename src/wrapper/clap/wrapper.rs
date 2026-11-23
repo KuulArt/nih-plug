@@ -1910,6 +1910,9 @@ impl<P: ClapPlugin> Wrapper<P> {
     ///
     /// `self.plugin` must _not_ be locked while calling this function or it will deadlock.
     pub fn set_state_inner(&self, state: &mut PluginState) -> bool {
+        // Before deserializing, so a GUI edit landing in between still reaches the host
+        self.stalled_edits.drop_values();
+
         let audio_io_layout = self.current_audio_io_layout.load();
         let buffer_config = self.current_buffer_config.load();
 
