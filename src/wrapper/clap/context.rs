@@ -141,9 +141,11 @@ impl<P: ClapPlugin> GuiContext for WrapperGuiContext<P> {
     unsafe fn raw_begin_set_parameter(&self, param: ParamPtr) {
         match self.wrapper.param_ptr_to_hash.get(&param) {
             Some(hash) => {
-                let success = self
-                    .wrapper
-                    .queue_parameter_event(OutputParamEvent::BeginGesture { param_hash: *hash });
+                let success =
+                    self.wrapper
+                        .queue_gui_parameter_event(OutputParamEvent::BeginGesture {
+                            param_hash: *hash,
+                        });
 
                 nih_debug_assert!(
                     success,
@@ -173,11 +175,12 @@ impl<P: ClapPlugin> GuiContext for WrapperGuiContext<P> {
                 // at the end of the current processing cycle or after requesting an explicit flush
                 // (when the plugin isn't processing audio). The parameter's actual value will only
                 // be changed when the output event is written to prevent changing parameter values
-                // in the middle of processing audio, unless the host has stopped processing.
+                // in the middle of processing audio, unless the host has stopped processing. See
+                // `Wrapper::queue_gui_parameter_event()`.
                 let clap_plain_value = normalized as f64 * param.step_count().unwrap_or(1) as f64;
                 let success = self
                     .wrapper
-                    .queue_parameter_event(OutputParamEvent::SetValue {
+                    .queue_gui_parameter_event(OutputParamEvent::SetValue {
                         param_hash: *hash,
                         clap_plain_value,
                     });
@@ -187,8 +190,6 @@ impl<P: ClapPlugin> GuiContext for WrapperGuiContext<P> {
                     "Parameter output event queue was full, parameter change will not be sent to \
                      the host"
                 );
-                self.wrapper
-                    .set_value_if_audio_stalled(*hash, clap_plain_value);
             }
             None => nih_debug_assert_failure!("Unknown parameter: {:?}", param),
         }
@@ -210,7 +211,7 @@ impl<P: ClapPlugin> GuiContext for WrapperGuiContext<P> {
             Some(hash) => {
                 let success = self
                     .wrapper
-                    .queue_parameter_event(OutputParamEvent::EndGesture { param_hash: *hash });
+                    .queue_gui_parameter_event(OutputParamEvent::EndGesture { param_hash: *hash });
 
                 nih_debug_assert!(
                     success,

@@ -92,6 +92,7 @@ use crate::prelude::{
 };
 use crate::util::permit_alloc;
 use crate::wrapper::clap::context::RemoteControlPages;
+use crate::wrapper::clap::stalled_edits::{Edit, Route, StalledEdits};
 use crate::wrapper::clap::util::{read_stream, write_stream};
 use crate::wrapper::state::{self, PluginState};
 use crate::wrapper::util::buffer_management::{BufferManager, ChannelPointers};
@@ -101,7 +102,8 @@ use crate::wrapper::util::{
 };
 
 /// How many output parameter changes we can store in our output parameter change queue. Storing
-/// more than this many parameters at a time will cause changes to get lost.
+/// more than this many parameters at a time will cause changes to get lost. The queue gets one
+/// extra place per parameter for the [`OutputParamEvent::Coalesced`] markers.
 const OUTPUT_EVENT_QUEUE_CAPACITY: usize = 2048;
 
 pub struct Wrapper<P: ClapPlugin> {
@@ -233,6 +235,8 @@ pub struct Wrapper<P: ClapPlugin> {
     ///      even if it does then that should still not be a problem because the host also reads it
     ///      in the same order, right?
     output_parameter_events: ArrayQueue<OutputParamEvent>,
+    /// GUI edits made while the host has stopped processing, at most one bundle per parameter.
+    stalled_edits: StalledEdits,
 
     host_thread_check: AtomicRefCell<Option<ClapPtr<clap_host_thread_check>>>,
 
@@ -321,6 +325,9 @@ pub enum OutputParamEvent {
     /// Begin an automation gesture. This must always be sent after sending one or more [`SetValue`]
     /// events.
     EndGesture { param_hash: u32 },
+    /// Stands for the parameter's pending bundle in [`Wrapper::stalled_edits`], written out as
+    /// [`BeginGesture`], [`SetValue`] and [`EndGesture`] with the latest value.
+    Coalesced { param_hash: u32 },
 }
 
 /// Because CLAP has this [`clap_host::request_host_callback()`] function, we don't need to use
@@ -659,7 +666,14 @@ impl<P: ClapPlugin> Wrapper<P> {
             param_id_to_hash,
             param_ptr_to_hash,
             poly_mod_ids_by_hash,
-            output_parameter_events: ArrayQueue::new(OUTPUT_EVENT_QUEUE_CAPACITY),
+            output_parameter_events: ArrayQueue::new(
+                OUTPUT_EVENT_QUEUE_CAPACITY + param_id_hashes_ptrs_groups.len(),
+            ),
+            stalled_edits: StalledEdits::new(
+                param_id_hashes_ptrs_groups
+                    .iter()
+                    .map(|(_, hash, _, _)| *hash),
+            ),
 
             host_thread_check: AtomicRefCell::new(None),
 
@@ -783,20 +797,45 @@ impl<P: ClapPlugin> Wrapper<P> {
             .map(|s| s.as_str())
     }
 
-    /// Sets a GUI parameter change at once if no `process()` call or flush can be counted on to
-    /// do it: the plugin is not processing, or the host stopped calling `process()` (REAPER's FX
-    /// bypass, which doesn't flush either). The queued output event sets it again later.
-    pub fn set_value_if_audio_stalled(&self, param_hash: u32, clap_plain_value: f64) {
-        if self
+    /// Queue a GUI parameter event. While the host has stopped processing (the plugin is not
+    /// processing, or REAPER's FX bypass, which neither calls `process()` nor flushes) a value is
+    /// set at once, and the events are coalesced into one bundle per parameter so the output queue
+    /// can't overflow and drop the newest values. Otherwise this is
+    /// [`queue_parameter_event()`][Self::queue_parameter_event()].
+    pub fn queue_gui_parameter_event(&self, event: OutputParamEvent) -> bool {
+        let (param_hash, edit) = match event {
+            OutputParamEvent::BeginGesture { param_hash } => (param_hash, Edit::Begin),
+            OutputParamEvent::SetValue {
+                param_hash,
+                clap_plain_value,
+            } => (param_hash, Edit::Set(clap_plain_value)),
+            OutputParamEvent::EndGesture { param_hash } => (param_hash, Edit::End),
+            OutputParamEvent::Coalesced { .. } => return self.queue_parameter_event(event),
+        };
+
+        let stalled = self
             .heartbeat
-            .audio_stalled(self.is_processing.load(Ordering::SeqCst))
-        {
+            .audio_stalled(self.is_processing.load(Ordering::SeqCst));
+        if let (true, Edit::Set(clap_plain_value)) = (stalled, edit) {
             let sample_rate = self.current_buffer_config.load().map(|c| c.sample_rate);
             self.update_plain_value_by_hash(
                 param_hash,
                 ClapParamUpdate::PlainValueSet(clap_plain_value),
                 sample_rate,
             );
+        }
+
+        match self.stalled_edits.record(param_hash, edit, stalled) {
+            Route::Direct => self.queue_parameter_event(event),
+            Route::Coalesced { push_marker: true } => {
+                let success =
+                    self.queue_parameter_event(OutputParamEvent::Coalesced { param_hash });
+                if !success {
+                    self.stalled_edits.marker_dropped(param_hash);
+                }
+                success
+            }
+            Route::Coalesced { push_marker: false } => true,
         }
     }
 
@@ -1007,6 +1046,86 @@ impl<P: ClapPlugin> Wrapper<P> {
         None
     }
 
+    /// Write one parameter output event to the host, setting the parameter's value for a
+    /// [`OutputParamEvent::SetValue`].
+    ///
+    /// # Safety
+    ///
+    /// `out` must be a valid object.
+    unsafe fn write_out_param_event(
+        &self,
+        out: &clap_output_events,
+        change: OutputParamEvent,
+        time: u32,
+        sample_rate: Option<f32>,
+    ) {
+        let push_successful = match change {
+            OutputParamEvent::BeginGesture { param_hash } => {
+                let event = clap_event_param_gesture {
+                    header: clap_event_header {
+                        size: mem::size_of::<clap_event_param_gesture>() as u32,
+                        time,
+                        space_id: CLAP_CORE_EVENT_SPACE_ID,
+                        type_: CLAP_EVENT_PARAM_GESTURE_BEGIN,
+                        flags: CLAP_EVENT_IS_LIVE,
+                    },
+                    param_id: param_hash,
+                };
+
+                clap_call! { out=>try_push(out, &event.header) }
+            }
+            OutputParamEvent::SetValue {
+                param_hash,
+                clap_plain_value,
+            } => {
+                self.update_plain_value_by_hash(
+                    param_hash,
+                    ClapParamUpdate::PlainValueSet(clap_plain_value),
+                    sample_rate,
+                );
+
+                let event = clap_event_param_value {
+                    header: clap_event_header {
+                        size: mem::size_of::<clap_event_param_value>() as u32,
+                        time,
+                        space_id: CLAP_CORE_EVENT_SPACE_ID,
+                        type_: CLAP_EVENT_PARAM_VALUE,
+                        flags: CLAP_EVENT_IS_LIVE,
+                    },
+                    param_id: param_hash,
+                    cookie: std::ptr::null_mut(),
+                    port_index: -1,
+                    note_id: -1,
+                    channel: -1,
+                    key: -1,
+                    value: clap_plain_value,
+                };
+
+                clap_call! { out=>try_push(out, &event.header) }
+            }
+            OutputParamEvent::EndGesture { param_hash } => {
+                let event = clap_event_param_gesture {
+                    header: clap_event_header {
+                        size: mem::size_of::<clap_event_param_gesture>() as u32,
+                        time,
+                        space_id: CLAP_CORE_EVENT_SPACE_ID,
+                        type_: CLAP_EVENT_PARAM_GESTURE_END,
+                        flags: CLAP_EVENT_IS_LIVE,
+                    },
+                    param_id: param_hash,
+                };
+
+                clap_call! { out=>try_push(out, &event.header) }
+            }
+            OutputParamEvent::Coalesced { .. } => {
+                nih_debug_assert_failure!("A coalesced marker can't be written as an event");
+                true
+            }
+        };
+
+        nih_debug_assert!(push_successful);
+    }
+
     /// Write the unflushed parameter changes to the host's output event queue. The sample index is
     /// used as part of splitting up the input buffer for sample accurate automation changes. This
     /// will also modify the actual parameter values, since we should only do that while the wrapped
@@ -1027,67 +1146,41 @@ impl<P: ClapPlugin> Wrapper<P> {
         // shouldn't have to think about interleaving events here
         let sample_rate = self.current_buffer_config.load().map(|c| c.sample_rate);
         while let Some(change) = self.output_parameter_events.pop() {
-            let push_successful = match change {
-                OutputParamEvent::BeginGesture { param_hash } => {
-                    let event = clap_event_param_gesture {
-                        header: clap_event_header {
-                            size: mem::size_of::<clap_event_param_gesture>() as u32,
-                            time: current_sample_idx as u32,
-                            space_id: CLAP_CORE_EVENT_SPACE_ID,
-                            type_: CLAP_EVENT_PARAM_GESTURE_BEGIN,
-                            flags: CLAP_EVENT_IS_LIVE,
-                        },
-                        param_id: param_hash,
-                    };
-
-                    clap_call! { out=>try_push(out, &event.header) }
+            match change {
+                OutputParamEvent::Coalesced { param_hash } => {
+                    let bundle = self.stalled_edits.take(param_hash);
+                    if bundle.begin {
+                        self.write_out_param_event(
+                            out,
+                            OutputParamEvent::BeginGesture { param_hash },
+                            current_sample_idx as u32,
+                            sample_rate,
+                        );
+                    }
+                    if let Some(clap_plain_value) = bundle.value {
+                        self.write_out_param_event(
+                            out,
+                            OutputParamEvent::SetValue {
+                                param_hash,
+                                clap_plain_value,
+                            },
+                            current_sample_idx as u32,
+                            sample_rate,
+                        );
+                    }
+                    if bundle.end {
+                        self.write_out_param_event(
+                            out,
+                            OutputParamEvent::EndGesture { param_hash },
+                            current_sample_idx as u32,
+                            sample_rate,
+                        );
+                    }
                 }
-                OutputParamEvent::SetValue {
-                    param_hash,
-                    clap_plain_value,
-                } => {
-                    self.update_plain_value_by_hash(
-                        param_hash,
-                        ClapParamUpdate::PlainValueSet(clap_plain_value),
-                        sample_rate,
-                    );
-
-                    let event = clap_event_param_value {
-                        header: clap_event_header {
-                            size: mem::size_of::<clap_event_param_value>() as u32,
-                            time: current_sample_idx as u32,
-                            space_id: CLAP_CORE_EVENT_SPACE_ID,
-                            type_: CLAP_EVENT_PARAM_VALUE,
-                            flags: CLAP_EVENT_IS_LIVE,
-                        },
-                        param_id: param_hash,
-                        cookie: std::ptr::null_mut(),
-                        port_index: -1,
-                        note_id: -1,
-                        channel: -1,
-                        key: -1,
-                        value: clap_plain_value,
-                    };
-
-                    clap_call! { out=>try_push(out, &event.header) }
+                change => {
+                    self.write_out_param_event(out, change, current_sample_idx as u32, sample_rate);
                 }
-                OutputParamEvent::EndGesture { param_hash } => {
-                    let event = clap_event_param_gesture {
-                        header: clap_event_header {
-                            size: mem::size_of::<clap_event_param_gesture>() as u32,
-                            time: current_sample_idx as u32,
-                            space_id: CLAP_CORE_EVENT_SPACE_ID,
-                            type_: CLAP_EVENT_PARAM_GESTURE_END,
-                            flags: CLAP_EVENT_IS_LIVE,
-                        },
-                        param_id: param_hash,
-                    };
-
-                    clap_call! { out=>try_push(out, &event.header) }
-                }
-            };
-
-            nih_debug_assert!(push_successful);
+            }
         }
 
         // Also send all note events generated by the plugin
@@ -1449,6 +1542,8 @@ impl<P: ClapPlugin> Wrapper<P> {
         match (raw_event.space_id, raw_event.type_) {
             (CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE) => {
                 let event = &*(event as *const clap_event_param_value);
+                // Arriving after every GUI edit still pending from a stall, the host's value wins
+                self.stalled_edits.host_set(event.param_id);
                 self.update_plain_value_by_hash(
                     event.param_id,
                     ClapParamUpdate::PlainValueSet(event.value),
