@@ -440,13 +440,6 @@ impl<P: Vst3Plugin> WrapperInner<P> {
             .map(|s| s.as_str())
     }
 
-    /// Convenience function for setting a value for a parameter as triggered by a VST3 parameter
-    /// update. The same rate is for updating parameter smoothing.
-    ///
-    /// After calling this function, you should call
-    /// [`notify_param_values_changed()`][Self::notify_param_values_changed()] to allow the editor
-    /// to update itself. This needs to be done separately so you can process parameter changes in
-    /// batches.
     /// Whether a parameter change must be applied here instead of waiting for `process()`: the
     /// plugin is not processing, or the host stopped calling `process()` (REAPER's FX bypass).
     pub fn audio_stalled(&self) -> bool {
@@ -454,6 +447,13 @@ impl<P: Vst3Plugin> WrapperInner<P> {
             .audio_stalled(self.is_processing.load(Ordering::SeqCst))
     }
 
+    /// Convenience function for setting a value for a parameter as triggered by a VST3 parameter
+    /// update. The same rate is for updating parameter smoothing.
+    ///
+    /// After calling this function, you should call
+    /// [`notify_param_values_changed()`][Self::notify_param_values_changed()] to allow the editor
+    /// to update itself. This needs to be done separately so you can process parameter changes in
+    /// batches.
     pub fn set_normalized_value_by_hash(
         &self,
         hash: u32,

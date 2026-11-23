@@ -797,6 +797,13 @@ impl<P: ClapPlugin> Wrapper<P> {
             .map(|s| s.as_str())
     }
 
+    /// Whether a GUI edit must be applied here instead of waiting for `process()`: the plugin is
+    /// not processing, or the host stopped calling `process()` (REAPER's FX bypass).
+    fn audio_stalled(&self) -> bool {
+        self.heartbeat
+            .audio_stalled(self.is_processing.load(Ordering::SeqCst))
+    }
+
     /// Queue a GUI parameter event. While the host has stopped processing (the plugin is not
     /// processing, or REAPER's FX bypass, which neither calls `process()` nor flushes) a value is
     /// set at once, and the events are coalesced into one bundle per parameter so the output queue
@@ -813,9 +820,7 @@ impl<P: ClapPlugin> Wrapper<P> {
             OutputParamEvent::Coalesced { .. } => return self.queue_parameter_event(event),
         };
 
-        let stalled = self
-            .heartbeat
-            .audio_stalled(self.is_processing.load(Ordering::SeqCst));
+        let stalled = self.audio_stalled();
         if let (true, Edit::Set(clap_plain_value)) = (stalled, edit) {
             let sample_rate = self.current_buffer_config.load().map(|c| c.sample_rate);
             self.update_plain_value_by_hash(
