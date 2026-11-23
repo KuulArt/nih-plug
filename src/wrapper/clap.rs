@@ -4,6 +4,7 @@ mod util;
 mod context;
 mod descriptor;
 mod ext;
+mod stalled_edits;
 pub mod features;
 mod wrapper;
 
