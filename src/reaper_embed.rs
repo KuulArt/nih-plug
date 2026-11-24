@@ -65,8 +65,10 @@ pub struct RawDrawInfo {
 pub struct RawSizeHints {
     pub preferred_aspect: i32,
     pub minimum_aspect: i32,
-    pub _res1: i32,
-    pub _res2: i32,
+    /// Set by REAPER 7.36+: `flags & 15` is the place (0 unknown, 1 TCP, 2 MCP).
+    pub flags: i32,
+    /// Set by REAPER 7.36+: 256 = 100 %, excluding Retina's 2x (0 unknown).
+    pub dpi: i32,
     pub _res3: i32,
     pub _res4: i32,
     pub min_width: i32,
@@ -78,12 +80,23 @@ pub struct RawSizeHints {
 /// Where REAPER shows the view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbedPlace {
-    /// REAPER 6.23 and earlier don't say.
+    /// REAPER 6.23 and earlier don't say (7.35 and earlier, for size hints).
     Unknown,
     /// The track control panel.
     Tcp,
     /// The mixer strip.
     Mcp,
+}
+
+impl EmbedPlace {
+    /// A draw info's `context`, or a size hints' `flags & 15`.
+    pub fn from_raw(context: i32) -> Self {
+        match context {
+            1 => EmbedPlace::Tcp,
+            2 => EmbedPlace::Mcp,
+            _ => EmbedPlace::Unknown,
+        }
+    }
 }
 
 /// What REAPER says about the view with a paint or a mouse message.
@@ -109,11 +122,7 @@ pub struct EmbedInfo {
 impl EmbedInfo {
     pub fn from_raw(raw: &RawDrawInfo) -> Self {
         EmbedInfo {
-            place: match raw.context {
-                1 => EmbedPlace::Tcp,
-                2 => EmbedPlace::Mcp,
-                _ => EmbedPlace::Unknown,
-            },
+            place: EmbedPlace::from_raw(raw.context),
             dpi: (raw.dpi > 0).then(|| raw.dpi as f32 / 256.0),
             wheel: raw.mousewheel_amt,
             width: raw.width,
@@ -229,8 +238,9 @@ impl EmbedCanvas<'_> {
 /// A plugin's embedded view. Every call comes from REAPER's UI thread; `context` writes params as
 /// the editor's [`GuiContext`] does (`beginEdit` / `performEdit` / `endEdit`).
 pub trait ReaperEmbed: Send {
-    /// `None` leaves REAPER's own size.
-    fn size_hints(&self) -> Option<EmbedSizeHints> {
+    /// `None` leaves REAPER's own size. `place` is where REAPER asks for (REAPER 7.36+;
+    /// [`EmbedPlace::Unknown`] before).
+    fn size_hints(&self, _place: EmbedPlace) -> Option<EmbedSizeHints> {
         None
     }
 

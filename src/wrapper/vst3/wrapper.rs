@@ -2053,9 +2053,9 @@ mod reaper_embed_tests {
 
     struct Recorder;
     impl ReaperEmbed for Recorder {
-        fn size_hints(&self) -> Option<EmbedSizeHints> {
+        fn size_hints(&self, place: EmbedPlace) -> Option<EmbedSizeHints> {
             Some(EmbedSizeHints {
-                preferred_aspect: 3.0,
+                preferred_aspect: if place == EmbedPlace::Mcp { 1.5 } else { 3.0 },
                 minimum_aspect: 1.0,
                 min_width: 40,
                 min_height: 16,
@@ -2202,8 +2202,25 @@ mod reaper_embed_tests {
             let mut hints = RawSizeHints::default();
             let p3 = &mut hints as *mut RawSizeHints as isize;
             assert_eq!(w.embed_message(msg::GETMINMAXINFO, 0, p3), 1);
-            assert_eq!(hints.preferred_aspect, 3 << 16);
+            assert_eq!(
+                hints.preferred_aspect,
+                3 << 16,
+                "no place: REAPER 7.35 and earlier"
+            );
             assert_eq!((hints.min_width, hints.min_height), (40, 16));
+            for (flags, aspect) in [(1, 3 << 16), (2, 3 << 15)] {
+                let mut hints = RawSizeHints {
+                    flags,
+                    dpi: 256,
+                    ..RawSizeHints::default()
+                };
+                let p3 = &mut hints as *mut RawSizeHints as isize;
+                assert_eq!(w.embed_message(msg::GETMINMAXINFO, 0, p3), 1);
+                assert_eq!(
+                    hints.preferred_aspect, aspect,
+                    "the place REAPER asks for (flags {flags})"
+                );
+            }
 
             let vt = vtable();
             let mut bmp = FakeBitmap {

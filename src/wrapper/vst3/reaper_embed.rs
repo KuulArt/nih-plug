@@ -26,7 +26,7 @@ use vst3_sys::com_interface;
 
 use crate::prelude::GuiContext;
 use crate::reaper_embed::{
-    msg, EmbedCanvas, EmbedInfo, EmbedMouse, RawDrawInfo, RawSizeHints, ReaperEmbed,
+    msg, EmbedCanvas, EmbedInfo, EmbedMouse, EmbedPlace, RawDrawInfo, RawSizeHints, ReaperEmbed,
 };
 
 // Alias needed for the `com_interface` macro
@@ -119,13 +119,16 @@ pub(crate) unsafe fn dispatch(
             embed.destroyed(context);
             0
         }
-        msg::GETMINMAXINFO => match (embed.size_hints(), parm3 != 0) {
-            (Some(h), true) => {
-                h.write(&mut *(parm3 as *mut RawSizeHints));
-                1
+        msg::GETMINMAXINFO if parm3 != 0 => {
+            let raw = &mut *(parm3 as *mut RawSizeHints);
+            match embed.size_hints(EmbedPlace::from_raw(raw.flags & 15)) {
+                Some(h) => {
+                    h.write(raw);
+                    1
+                }
+                None => 0,
             }
-            _ => 0,
-        },
+        }
         msg::PAINT => match (canvas_of(parm2 as *mut c_void), info()) {
             (Some(mut canvas), Some(info)) => embed.paint(&mut canvas, &info, context) as isize,
             _ => 0,
