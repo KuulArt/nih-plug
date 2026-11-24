@@ -1992,7 +1992,11 @@ impl<P: Vst3Plugin> IReaperUIEmbedInterface for Wrapper<P> {
             .get_or_insert_with(|| self.inner.clone().make_gui_context())
             .clone();
         drop(slot);
-        reaper_embed::dispatch(Some(embed), context.as_ref(), msg, parm2, parm3)
+        // a panic unwinding into REAPER's C++ would abort REAPER: the message is dropped instead
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            reaper_embed::dispatch(Some(embed), context.as_ref(), msg, parm2, parm3)
+        }))
+        .unwrap_or(0)
     }
 }
 
@@ -2087,8 +2091,20 @@ mod reaper_embed_tests {
         }
     }
 
+    /// Panics in every paint.
+    struct Panicky;
+    impl ReaperEmbed for Panicky {
+        fn paint(&mut self, _: &mut EmbedCanvas<'_>, _: &EmbedInfo, _: &dyn GuiContext) -> bool {
+            panic!("a paint that panics");
+        }
+        fn mouse(&mut self, _: EmbedMouse, _: &EmbedInfo, _: &dyn GuiContext) -> EmbedReply {
+            EmbedReply::Handled
+        }
+    }
+
     test_plugin!(Plain, b"nih-embed-plain!", None);
     test_plugin!(Embedded, b"nih-embed-yes!!!", Some(Box::new(Recorder)));
+    test_plugin!(Panicking, b"nih-embed-panic!", Some(Box::new(Panicky)));
 
     /// A C++ `REAPER_FXEMBED_IBitmap` as REAPER lays it out: the vtable pointer first.
     #[repr(C)]
@@ -2187,6 +2203,30 @@ mod reaper_embed_tests {
             let mut info = draw_info(0);
             let p3 = &mut info as *mut RawDrawInfo as isize;
             assert_eq!(w.embed_message(msg::LBUTTONDOWN, 0, p3), 0);
+        }
+    }
+
+    #[test]
+    fn a_panic_in_the_embed_answers_0_and_the_next_message_still_arrives() {
+        let w = Wrapper::<Panicking>::new();
+        let vt = vtable();
+        let mut bmp = FakeBitmap {
+            vtbl: &vt,
+            bits: vec![0; 8 * 4],
+            w: 8,
+            h: 4,
+            span: 8,
+        };
+        let p2 = &mut bmp as *mut FakeBitmap as isize;
+        let mut info = draw_info(0);
+        let p3 = &mut info as *mut RawDrawInfo as isize;
+        unsafe {
+            assert_eq!(w.embed_message(msg::PAINT, p2, p3), 0);
+            assert_eq!(
+                w.embed_message(msg::LBUTTONDOWN, 0, p3),
+                msg::RET_HANDLED,
+                "the embed's lock was released by the unwind"
+            );
         }
     }
 
