@@ -20,6 +20,7 @@ use crate::prelude::{
     AsyncExecutor, AudioIOLayout, BufferConfig, Editor, MidiConfig, ParamFlags, ParamPtr, Params,
     Plugin, PluginNoteEvent, ProcessMode, ProcessStatus, TaskExecutor, Transport, Vst3Plugin,
 };
+use crate::reaper_embed::ReaperEmbed;
 use crate::util::permit_alloc;
 use crate::wrapper::state::{self, PluginState};
 use crate::wrapper::util::buffer_management::BufferManager;
@@ -41,6 +42,9 @@ pub(crate) struct WrapperInner<P: Vst3Plugin> {
     /// The plugin's gain reduction meter, if it reports its gain reduction. See
     /// [`Plugin::gain_reduction_meter()`][crate::prelude::Plugin::gain_reduction_meter()].
     pub gain_reduction_meter: Option<Arc<AtomicF32>>,
+    /// The plugin's REAPER embedded view, if it has one. See
+    /// [`Vst3Plugin::reaper_embed()`][crate::prelude::Vst3Plugin::reaper_embed()].
+    pub reaper_embed: Option<Mutex<Box<dyn ReaperEmbed>>>,
     /// The plugin's editor, if it has one. This object does not do anything on its own, but we need
     /// to instantiate this in advance so we don't need to lock the entire [`Plugin`] object when
     /// creating an editor. Wrapped in an `AtomicRefCell` because it needs to be initialized late.
@@ -209,6 +213,7 @@ impl<P: Vst3Plugin> WrapperInner<P> {
         // remain in the same order as the one returned by the plugin.
         let params = plugin.params();
         let gain_reduction_meter = plugin.gain_reduction_meter();
+        let reaper_embed = plugin.reaper_embed().map(Mutex::new);
         let param_id_hashes_ptrs_groups: Vec<_> = params
             .param_map()
             .into_iter()
@@ -287,6 +292,7 @@ impl<P: Vst3Plugin> WrapperInner<P> {
             task_executor,
             params,
             gain_reduction_meter,
+            reaper_embed,
             // Initialized later as it needs a reference to the wrapper for the async executor
             editor: AtomicRefCell::new(None),
 

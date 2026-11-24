@@ -1,5 +1,6 @@
 use super::Plugin;
 use crate::prelude::Vst3SubCategory;
+use crate::reaper_embed::ReaperEmbed;
 
 /// Provides auxiliary metadata needed for a VST3 plugin.
 pub trait Vst3Plugin: Plugin {
@@ -17,6 +18,16 @@ pub trait Vst3Plugin: Plugin {
     /// [`VST3_CLASS_ID`][Self::VST3_CLASS_ID`] in the correct order for the current platform so
     /// projects and presets can be shared between platforms. This should not be overridden.
     const PLATFORM_VST3_CLASS_ID: [u8; 16] = swap_vst3_uid_byte_order(Self::VST3_CLASS_ID);
+
+    /// The plugin's REAPER embedded view (the small live view REAPER can show inside the track
+    /// panel and the mixer strip), if it has one: see [`ReaperEmbed`]. Without it the controller's
+    /// `IReaperUIEmbedInterface` answers that embedding is not supported.
+    ///
+    /// Queried only once immediately after the plugin instance is created. This function takes
+    /// `&mut self` to make it easier to move data into the `ReaperEmbed` implementation.
+    fn reaper_embed(&mut self) -> Option<Box<dyn ReaperEmbed>> {
+        None
+    }
 }
 
 #[cfg(not(target_os = "windows"))]

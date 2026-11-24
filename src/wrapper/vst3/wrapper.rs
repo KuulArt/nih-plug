@@ -1,3 +1,4 @@
+use atomic_refcell::AtomicRefCell;
 use std::borrow::Borrow;
 use std::ffi::c_void;
 use std::mem::{self, MaybeUninit};
@@ -21,9 +22,11 @@ use vst3_sys::vst::{
 use vst3_sys::{ComInterface, VST3};
 use widestring::U16CStr;
 
+use super::context::WrapperGuiContext;
 use super::gain_reduction::IGainReductionInfo;
 use super::inner::{ProcessEvent, WrapperInner};
 use super::note_expressions::{self, NoteExpressionController};
+use super::reaper_embed::{self, IReaperUIEmbedInterface};
 use super::util::{
     u16strlcpy, VstPtr, VST3_MIDI_CCS, VST3_MIDI_NUM_PARAMS, VST3_MIDI_PARAMS_START,
 };
@@ -49,15 +52,19 @@ use vst3_sys as vst3_com;
     INoteExpressionController,
     IProcessContextRequirements,
     IUnitInfo,
-    IGainReductionInfo
+    IGainReductionInfo,
+    IReaperUIEmbedInterface
 ))]
 pub struct Wrapper<P: Vst3Plugin> {
     inner: Arc<WrapperInner<P>>,
+    /// The param context the REAPER embedded view writes through, made at its first message. It
+    /// holds `inner`, so it is dropped before `inner`'s count is checked.
+    embed_context: AtomicRefCell<Option<Arc<WrapperGuiContext<P>>>>,
 }
 
 impl<P: Vst3Plugin> Wrapper<P> {
     pub fn new() -> Box<Self> {
-        let wrapper = Self::allocate(WrapperInner::new());
+        let wrapper = Self::allocate(WrapperInner::new(), AtomicRefCell::new(None));
         if wrapper.inner.gain_reduction_meter.is_none() {
             // SAFETY: The host has not received this object yet
             unsafe { wrapper.hide_gain_reduction_info() };
@@ -97,7 +104,8 @@ impl<P: Vst3Plugin> Wrapper<P> {
             __inoteexpressioncontrollervptr => 4,
             __iprocesscontextrequirementsvptr => 5,
             __iunitinfovptr => 6,
-            __igainreductioninfovptr => 7
+            __igainreductioninfovptr => 7,
+            __ireaperuiembedinterfacevptr => 8
         );
     }
 }
@@ -123,6 +131,7 @@ unsafe extern "system" fn query_interface_without_gain_reduction<
 
 impl<P: Vst3Plugin> Drop for Wrapper<P> {
     fn drop(&mut self) {
+        self.embed_context.borrow_mut().take();
         nih_debug_assert_eq!(Arc::strong_count(&self.inner), 1);
     }
 }
@@ -1967,5 +1976,277 @@ impl<P: Vst3Plugin> IGainReductionInfo for Wrapper<P> {
             Some(meter) => meter.load(Ordering::Relaxed).min(0.0) as f64,
             None => 0.0,
         }
+    }
+}
+
+impl<P: Vst3Plugin> IReaperUIEmbedInterface for Wrapper<P> {
+    unsafe fn embed_message(&self, msg: i32, parm2: isize, parm3: isize) -> isize {
+        let Some(embed) = &self.inner.reaper_embed else {
+            return 0;
+        };
+        // REAPER's UI thread is the only caller, so this borrow is never contended
+        let Ok(mut slot) = self.embed_context.try_borrow_mut() else {
+            return 0;
+        };
+        let context = slot
+            .get_or_insert_with(|| self.inner.clone().make_gui_context())
+            .clone();
+        drop(slot);
+        reaper_embed::dispatch(Some(embed), context.as_ref(), msg, parm2, parm3)
+    }
+}
+
+#[cfg(test)]
+mod reaper_embed_tests {
+    use super::*;
+    use crate::prelude::{
+        AudioIOLayout, Buffer, EmbedCanvas, EmbedInfo, EmbedMouse, EmbedPlace, EmbedReply,
+        EmbedSizeHints, GuiContext, Params, Plugin, ProcessContext, ReaperEmbed, Vst3SubCategory,
+    };
+    use crate::reaper_embed::{msg, RawDrawInfo, RawSizeHints};
+    use std::sync::Mutex as StdMutex;
+
+    struct NoParams;
+    unsafe impl Params for NoParams {
+        fn param_map(&self) -> Vec<(String, crate::prelude::ParamPtr, String)> {
+            Vec::new()
+        }
+    }
+
+    macro_rules! test_plugin {
+        ($name:ident, $id:literal, $embed:expr) => {
+            #[derive(Default)]
+            struct $name;
+            impl Plugin for $name {
+                const NAME: &'static str = "test";
+                const VENDOR: &'static str = "test";
+                const URL: &'static str = "";
+                const EMAIL: &'static str = "";
+                const VERSION: &'static str = "0";
+                const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[];
+                type SysExMessage = ();
+                type BackgroundTask = ();
+                fn params(&self) -> Arc<dyn Params> {
+                    Arc::new(NoParams)
+                }
+                fn process(
+                    &mut self,
+                    _: &mut Buffer,
+                    _: &mut AuxiliaryBuffers,
+                    _: &mut impl ProcessContext<Self>,
+                ) -> ProcessStatus {
+                    ProcessStatus::Normal
+                }
+            }
+            impl Vst3Plugin for $name {
+                const VST3_CLASS_ID: [u8; 16] = *$id;
+                const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[Vst3SubCategory::Fx];
+                fn reaper_embed(&mut self) -> Option<Box<dyn ReaperEmbed>> {
+                    $embed
+                }
+            }
+        };
+    }
+
+    /// What the test embed saw, shared with the test.
+    static SEEN: StdMutex<Vec<String>> = StdMutex::new(Vec::new());
+
+    struct Recorder;
+    impl ReaperEmbed for Recorder {
+        fn size_hints(&self) -> Option<EmbedSizeHints> {
+            Some(EmbedSizeHints {
+                preferred_aspect: 3.0,
+                minimum_aspect: 1.0,
+                min_width: 40,
+                min_height: 16,
+                max_width: 2000,
+                max_height: 600,
+            })
+        }
+        fn created(&mut self, _: &dyn GuiContext) {
+            SEEN.lock().unwrap().push("create".into());
+        }
+        fn paint(&mut self, c: &mut EmbedCanvas<'_>, info: &EmbedInfo, _: &dyn GuiContext) -> bool {
+            SEEN.lock().unwrap().push(format!(
+                "paint {}x{} span {} scale {:?} {:?} dpi {:?} optional {}",
+                c.width, c.height, c.row_span, c.scale, info.place, info.dpi, info.paint_optional
+            ));
+            c.row_mut(1)[2] = 0xFF11_2233;
+            true
+        }
+        fn mouse(&mut self, e: EmbedMouse, info: &EmbedInfo, _: &dyn GuiContext) -> EmbedReply {
+            SEEN.lock().unwrap().push(format!(
+                "{e:?} at {},{} wheel {}",
+                info.mouse_x, info.mouse_y, info.wheel
+            ));
+            if e == EmbedMouse::LeftDown {
+                EmbedReply::HandledRedraw
+            } else {
+                EmbedReply::Pass
+            }
+        }
+    }
+
+    test_plugin!(Plain, b"nih-embed-plain!", None);
+    test_plugin!(Embedded, b"nih-embed-yes!!!", Some(Box::new(Recorder)));
+
+    /// A C++ `REAPER_FXEMBED_IBitmap` as REAPER lays it out: the vtable pointer first.
+    #[repr(C)]
+    struct FakeBitmap {
+        vtbl: *const [usize; 10],
+        bits: Vec<u32>,
+        w: i32,
+        h: i32,
+        span: i32,
+    }
+    unsafe extern "C" fn bits(this: *mut c_void) -> *mut u32 {
+        (*(this as *mut FakeBitmap)).bits.as_mut_ptr()
+    }
+    unsafe extern "C" fn width(this: *mut c_void) -> i32 {
+        (*(this as *mut FakeBitmap)).w
+    }
+    unsafe extern "C" fn height(this: *mut c_void) -> i32 {
+        (*(this as *mut FakeBitmap)).h
+    }
+    unsafe extern "C" fn span(this: *mut c_void) -> i32 {
+        (*(this as *mut FakeBitmap)).span
+    }
+    unsafe extern "C" fn flipped(_: *mut c_void) -> bool {
+        false
+    }
+    unsafe extern "C" fn extended(_: *mut c_void, id: i32, _: *mut c_void) -> isize {
+        if id == msg::EXT_GET_ADVISORY_SCALING {
+            512
+        } else {
+            0
+        }
+    }
+
+    fn vtable() -> [usize; 10] {
+        let dtors = if cfg!(target_os = "windows") { 1 } else { 2 };
+        let mut v = [0usize; 10];
+        let fns = [
+            bits as *const () as usize,
+            width as *const () as usize,
+            height as *const () as usize,
+            span as *const () as usize,
+            flipped as *const () as usize,
+            0,
+            0,
+            extended as *const () as usize,
+        ];
+        v[dtors..dtors + fns.len()].copy_from_slice(&fns);
+        v
+    }
+
+    fn draw_info(flags: i32) -> RawDrawInfo {
+        RawDrawInfo {
+            context: 1,
+            dpi: 512,
+            mousewheel_amt: 120,
+            _res2: 0.0,
+            width: 8,
+            height: 4,
+            mouse_x: 5,
+            mouse_y: 3,
+            flags,
+            _res3: 0,
+            spare: [std::ptr::null_mut(); 6],
+        }
+    }
+
+    unsafe fn query_embed(w: &Wrapper<impl Vst3Plugin>) -> tresult {
+        let mut obj = std::ptr::null_mut();
+        let iid = <dyn IReaperUIEmbedInterface as ComInterface>::IID;
+        let r = w.query_interface(&iid, &mut obj);
+        if r == kResultOk {
+            w.release();
+        }
+        r
+    }
+
+    #[test]
+    fn the_interface_has_reapers_iid() {
+        // DECLARE_CLASS_IID (IReaperUIEmbedInterface, 0x049bf9e7, 0xbc74ead0, 0xc4101e86, 0x7f725981)
+        let iid = <dyn IReaperUIEmbedInterface as ComInterface>::IID;
+        let want: [u8; 16] = [
+            0x04, 0x9b, 0xf9, 0xe7, 0xbc, 0x74, 0xea, 0xd0, 0xc4, 0x10, 0x1e, 0x86, 0x7f, 0x72,
+            0x59, 0x81,
+        ];
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(iid.data, want);
+        let _ = want;
+    }
+
+    #[test]
+    fn a_plugin_without_an_embed_says_embedding_is_unsupported() {
+        let w = Wrapper::<Plain>::new();
+        unsafe {
+            assert_eq!(query_embed(&w), kResultOk, "REAPER can still query it");
+            assert_eq!(w.embed_message(msg::IS_SUPPORTED, 0, 0), 0);
+            let mut info = draw_info(0);
+            let p3 = &mut info as *mut RawDrawInfo as isize;
+            assert_eq!(w.embed_message(msg::LBUTTONDOWN, 0, p3), 0);
+        }
+    }
+
+    #[test]
+    fn messages_reach_the_plugins_embed() {
+        SEEN.lock().unwrap().clear();
+        let w = Wrapper::<Embedded>::new();
+        unsafe {
+            assert_eq!(query_embed(&w), kResultOk);
+            assert_eq!(w.embed_message(msg::IS_SUPPORTED, 0, 0), 1);
+            w.embed_message(msg::CREATE, 0, 0);
+
+            let mut hints = RawSizeHints::default();
+            let p3 = &mut hints as *mut RawSizeHints as isize;
+            assert_eq!(w.embed_message(msg::GETMINMAXINFO, 0, p3), 1);
+            assert_eq!(hints.preferred_aspect, 3 << 16);
+            assert_eq!((hints.min_width, hints.min_height), (40, 16));
+
+            let vt = vtable();
+            let mut bmp = FakeBitmap {
+                vtbl: &vt,
+                bits: vec![0; 10 * 4],
+                w: 8,
+                h: 4,
+                span: 10,
+            };
+            let p2 = &mut bmp as *mut FakeBitmap as isize;
+            let mut info = draw_info(msg::FLAG_PAINT_OPTIONAL);
+            let p3 = &mut info as *mut RawDrawInfo as isize;
+            assert_eq!(w.embed_message(msg::PAINT, p2, p3), 1);
+            assert_eq!(
+                bmp.bits[10 + 2],
+                0xFF11_2233,
+                "row 1, column 2 through the row span"
+            );
+
+            let mut info = draw_info(0);
+            let p3 = &mut info as *mut RawDrawInfo as isize;
+            assert_eq!(
+                w.embed_message(msg::LBUTTONDOWN, 0, p3),
+                msg::RET_HANDLED | msg::RET_INVALIDATE
+            );
+            assert_eq!(
+                w.embed_message(msg::MOUSEWHEEL, 0, p3),
+                0,
+                "a passed message is 0"
+            );
+            assert_eq!(w.embed_message(msg::SETCURSOR, 0, p3), 0);
+            w.embed_message(msg::DESTROY, 0, 0);
+        }
+        let seen = SEEN.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            [
+                "create",
+                "paint 8x4 span 10 scale Some(2.0) Tcp dpi Some(2.0) optional true",
+                "LeftDown at 5,3 wheel 120",
+                "Wheel at 5,3 wheel 120",
+            ]
+        );
+        let _ = EmbedPlace::Mcp;
     }
 }

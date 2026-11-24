@@ -38,6 +38,9 @@ pub use crate::plugin::clap::{ClapPlugin, PolyModulationConfig};
 #[cfg(feature = "vst3")]
 pub use crate::plugin::vst3::Vst3Plugin;
 pub use crate::plugin::{Plugin, ProcessStatus, TaskExecutor};
+pub use crate::reaper_embed::{
+    EmbedCanvas, EmbedInfo, EmbedMouse, EmbedPlace, EmbedReply, EmbedSizeHints, ReaperEmbed,
+};
 pub use crate::wrapper::clap::features::ClapFeature;
 pub use crate::wrapper::state::PluginState;
 #[cfg(feature = "vst3")]

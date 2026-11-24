@@ -10,6 +10,16 @@ Since there is no stable release yet, the changes are organized per day in
 reverse chronological order. The main purpose of this document in its current
 state is to list breaking changes.
 
+## [2026-11-24]
+
+### Added
+
+- VST3 plugins can now draw REAPER's embedded FX view (the live view REAPER shows
+  inside the track control panel and the mixer strip) by returning a
+  `ReaperEmbed` from the new `Vst3Plugin::reaper_embed()` method. The controller
+  answers REAPER's `IReaperUIEmbedInterface`; plugins that don't implement the
+  method answer that embedding is not supported.
+
 ## [2026-11-15]
 
 ### Added

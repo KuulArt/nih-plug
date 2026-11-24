@@ -7,6 +7,7 @@ mod gain_reduction;
 mod inner;
 mod note_expressions;
 mod param_units;
+mod reaper_embed;
 pub mod subcategories;
 mod view;
 mod wrapper;
